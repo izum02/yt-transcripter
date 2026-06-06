@@ -51,8 +51,7 @@ ytt_api = YouTubeTranscriptApi(
         proxy_username="hsdlmspx",
         proxy_password="w1bhmbj3ghmr",
     )
-    
-                              )
+)
 
 
 @app.route("/")
