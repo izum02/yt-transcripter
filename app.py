@@ -48,6 +48,7 @@ ytt_api = YouTubeTranscriptApi(
     proxy_config=WebshareProxyConfig(
         proxy_username="hsdlmspx",
         proxy_password="w1bhmbj3ghmr",
+        retries_when_blocked=0,
     )
 )
 
@@ -100,21 +101,28 @@ def captions():
 def caption():
     video_id = request.args.get("video_id")
     lang = request.args.get("lang", "en")
-
-    # auto/manual識別
-    gen = request.args.get("gen", "0") == "1"
+    gen = request.args.get("gen", "0") == "1"  # auto/manual
 
     if not video_id:
         return jsonify({"error": "video_id is required"}), 400
 
     try:
-        transcript = ytt_api.fetch(
-            video_id,
-            languages=[lang]
+        # ① 字幕一覧取得
+        transcript_list = ytt_api.list(video_id)
+
+        # ② 言語・自動/手動でフィルタ
+        transcript_obj = next(
+            (t for t in transcript_list if t.language_code == lang and t.is_generated == gen),
+            None
         )
 
-        result = []
+        if not transcript_obj:
+            return jsonify({"error": "指定した字幕が見つかりません"}), 404
 
+        # ③ 実際に字幕取得
+        transcript = transcript_obj.fetch()
+
+        result = []
         for item in transcript.to_raw_data():
             row = {
                 "text": item["text"],
@@ -122,7 +130,6 @@ def caption():
                 "duration": item["duration"]
             }
 
-            # 読みがな生成
             if request.args.get("gen_yomi", "0") == "1":
                 row["yomi"] = text_to_yomi(item["text"])
 
