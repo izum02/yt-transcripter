@@ -46,7 +46,13 @@ import os
 
 app = Flask(__name__)
 
-ytt_api = YouTubeTranscriptApi()
+ytt_api = YouTubeTranscriptApi(
+    proxy_config=WebshareProxyConfig(
+        proxy_username="hsdlmspx",
+        proxy_password="w1bhmbj3ghmr",
+    )
+    
+                              )
 
 
 @app.route("/")
