@@ -2,10 +2,8 @@ from sudachipy import Dictionary
 
 tokenizer = Dictionary().create()
 
-# 空白は無視
 IGNORE_SPACES = {" ", "　"}
 
-# そのまま残す記号
 KEEP_SYMBOLS = set('?!"#$%&()-=~^@＠*+;:[]{}\\/,.ー、。・「」（）［］｛｝！？：；　…―‐‒–—＋＃＄％＆＊／＼，．“”‘’ ')
 
 
@@ -15,18 +13,14 @@ def text_to_yomi(text: str) -> str:
     for m in tokenizer.tokenize(text):
         surface = m.surface()
 
-        # スペースは削除
         if surface in IGNORE_SPACES:
             continue
 
-        # 記号はそのまま残す
         if surface in KEEP_SYMBOLS:
             result.append(surface)
             continue
 
         reading = m.reading_form()
-
-        # Sudachiが記号扱いしたものは基本スキップ
         pos = m.part_of_speech()
 
         if (
@@ -40,17 +34,18 @@ def text_to_yomi(text: str) -> str:
 
     return "".join(result)
 
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+from youtube_transcript_api.proxies import WebshareProxyConfig
 import os
 
 app = Flask(__name__)
 CORS(app)
 
 ytt_api = YouTubeTranscriptApi(
-    proxy_config = WebshareProxyConfig(
+    proxy_config=WebshareProxyConfig(
         proxy_username="hsdlmspx",
         proxy_password="w1bhmbj3ghmr",
     )
@@ -59,9 +54,7 @@ ytt_api = YouTubeTranscriptApi(
 
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok"
-    })
+    return jsonify({"status": "ok"})
 
 
 @app.route("/captions")
@@ -69,9 +62,7 @@ def captions():
     video_id = request.args.get("video_id")
 
     if not video_id:
-        return jsonify({
-            "error": "video_id is required"
-        }), 400
+        return jsonify({"error": "video_id is required"}), 400
 
     try:
         transcript_list = ytt_api.list(video_id)
@@ -79,7 +70,11 @@ def captions():
         captions = []
 
         for transcript in transcript_list:
+            # ★ 修正②：一意IDを作成
+            track_id = f"{transcript.language_code}:{'auto' if transcript.is_generated else 'manual'}"
+
             captions.append({
+                "id": track_id,
                 "language": transcript.language,
                 "language_code": transcript.language_code,
                 "is_generated": transcript.is_generated,
@@ -88,6 +83,7 @@ def captions():
                     f"/caption?"
                     f"video_id={video_id}"
                     f"&lang={transcript.language_code}"
+                    f"&gen={'1' if transcript.is_generated else '0'}"
                 )
             })
 
@@ -97,9 +93,7 @@ def captions():
         })
 
     except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/caption")
@@ -107,13 +101,11 @@ def caption():
     video_id = request.args.get("video_id")
     lang = request.args.get("lang", "en")
 
-    # ★追加：0 or 1
-    gen_yomi = request.args.get("gen_yomi", "0") == "1"
+    # auto/manual識別
+    gen = request.args.get("gen", "0") == "1"
 
     if not video_id:
-        return jsonify({
-            "error": "video_id is required"
-        }), 400
+        return jsonify({"error": "video_id is required"}), 400
 
     try:
         transcript = ytt_api.fetch(
@@ -130,8 +122,8 @@ def caption():
                 "duration": item["duration"]
             }
 
-            # ★追加：読みがな生成
-            if gen_yomi:
+            # 読みがな生成
+            if request.args.get("gen_yomi", "0") == "1":
                 row["yomi"] = text_to_yomi(item["text"])
 
             result.append(row)
@@ -141,14 +133,12 @@ def caption():
             "language": transcript.language,
             "language_code": transcript.language_code,
             "is_generated": transcript.is_generated,
-            "gen_yomi": gen_yomi,
+            "requested_gen": gen,
             "transcript": result
         })
 
     except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
