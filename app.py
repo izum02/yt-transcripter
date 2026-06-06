@@ -42,7 +42,7 @@ def text_to_yomi(text: str) -> str:
 
 from flask import Flask, jsonify, request
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig
+from youtube_transcript_api.proxies import GenericProxyConfig WebshareProxyConfig
 import os
 
 app = Flask(__name__)
