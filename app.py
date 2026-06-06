@@ -41,11 +41,13 @@ def text_to_yomi(text: str) -> str:
     return "".join(result)
 
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 import os
 
 app = Flask(__name__)
+CORS(app)
 
 ytt_api = YouTubeTranscriptApi(
     proxy_config = WebshareProxyConfig(
