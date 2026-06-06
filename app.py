@@ -6,7 +6,7 @@ tokenizer = Dictionary().create()
 IGNORE_SPACES = {" ", "　"}
 
 # そのまま残す記号
-KEEP_SYMBOLS = set('?!"#$%&()-=~^@*+;:[{]}/\\,.')
+KEEP_SYMBOLS = set('?!"#$%&()-=~^@＠*+;:[]{}\\/,.ー、。・「」（）［］｛｝！？：；　…―‐‒–—＋＃＄％＆＊／＼，．“”‘’ ')
 
 
 def text_to_yomi(text: str) -> str:
