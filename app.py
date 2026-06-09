@@ -40,19 +40,122 @@ def text_to_yomi(text: str) -> str:
     return "".join(result)
 
 # --------------------------------
-# プロキシ設定
+# Webshareプロキシ管理
 # --------------------------------
-PROXY_USERNAME = os.environ.get("PROXY_USERNAME", "hsdlmspx")
-PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD", "w1bhmbj3ghmr")
-PROXY_HOST = os.environ.get("PROXY_HOST", "38.154.203.95")
-PROXY_PORT = os.environ.get("PROXY_PORT", "5863")
+WEBSHARE_API_KEY = os.environ.get("WEBSHARE_API_KEY", "73z2sf8gniy33wwoq7jeo1c2jwm0qt3dmoishc8z")
+WEBSHARE_API_URL = "https://proxy.webshare.io/api/v2/proxy/list/"
 
-def make_proxy(session_id: int = None) -> str:
-    if session_id:
-        # セッションID付きの場合（ドキュメントが何故か効かず）
-        return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+# プロキシキャッシュ
+proxy_cache = []
+last_fetch_time = 0
+CACHE_TTL = 300  # 5分間キャッシュ
+
+def fetch_proxies_from_webshare():
+    """Webshare APIからプロキシリストを取得"""
+    global proxy_cache, last_fetch_time
+    
+    import time
+    current_time = time.time()
+    
+    # キャッシュが有効なら再利用
+    if proxy_cache and (current_time - last_fetch_time) < CACHE_TTL:
+        return proxy_cache
+    
+    try:
+        params = {
+            "page": 1,
+            "page_size": 25,  # より多くのプロキシを取得
+            "mode": "direct"
+        }
+        headers = {"Authorization": f"Token {WEBSHARE_API_KEY}"}
+        
+        response = requests.get(WEBSHARE_API_URL, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        proxies = data.get('results', [])
+        
+        # 有効なプロキシのみをフィルタリング
+        valid_proxies = [p for p in proxies if p.get('valid', False)]
+        
+        if valid_proxies:
+            proxy_cache = valid_proxies
+            last_fetch_time = current_time
+            return valid_proxies
+        else:
+            # 有効なプロキシがない場合はフォールバック
+            return get_fallback_proxies()
+            
+    except Exception as e:
+        print(f"Failed to fetch proxies from Webshare: {e}")
+        return get_fallback_proxies()
+
+def get_fallback_proxies():
+    """フォールバック用のデフォルトプロキシ"""
+    return [{
+        'username': 'hsdlmspx',
+        'password': 'w1bhmbj3ghmr',
+        'proxy_address': '38.154.203.95',
+        'port': 5863,
+        'valid': True
+    }]
+
+def get_random_proxy():
+    """ランダムにプロキシを選択"""
+    proxies = fetch_proxies_from_webshare()
+    return random.choice(proxies) if proxies else get_fallback_proxies()[0]
+
+def get_proxy_by_address(proxy_address_port: str):
+    """
+    proxy_address:port 形式からプロキシを検索
+    見つからない場合はランダムに選択
+    """
+    if not proxy_address_port or ':' not in proxy_address_port:
+        return get_random_proxy()
+    
+    try:
+        address, port_str = proxy_address_port.split(':', 1)
+        port = int(port_str)
+        
+        proxies = fetch_proxies_from_webshare()
+        
+        # 指定されたアドレスとポートに一致するプロキシを検索
+        for proxy in proxies:
+            if proxy.get('proxy_address') == address and proxy.get('port') == port:
+                return proxy
+        
+        # 見つからない場合はランダムに選択
+        print(f"Proxy {proxy_address_port} not found, using random proxy")
+        return get_random_proxy()
+        
+    except ValueError:
+        return get_random_proxy()
+
+def make_proxy_from_dict(proxy_dict: dict) -> str:
+    """プロキシ辞書からプロキシURL文字列を生成"""
+    username = proxy_dict.get('username', '')
+    password = proxy_dict.get('password', '')
+    address = proxy_dict.get('proxy_address', '')
+    port = proxy_dict.get('port', '')
+    
+    if username and password:
+        return f"http://{username}:{password}@{address}:{port}"
     else:
-        return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+        return f"http://{address}:{port}"
+
+def make_proxy(proxy_address_port: str = None) -> tuple:
+    """
+    プロキシURLとプロキシ情報を返す
+    proxy_address_port: "address:port" 形式の文字列
+    Returns: (proxy_url, proxy_info_dict)
+    """
+    if proxy_address_port:
+        proxy_dict = get_proxy_by_address(proxy_address_port)
+    else:
+        proxy_dict = get_random_proxy()
+    
+    proxy_url = make_proxy_from_dict(proxy_dict)
+    return proxy_url, proxy_dict
 
 # --------------------------------
 # 字幕パース (SRT / VTT / JSON3)
@@ -217,12 +320,14 @@ def captions():
     if not video_id:
         return jsonify({"error": "video_id is required"}), 400
 
-    # セッションIDを生成
-    session_id = random.randint(1, 100000)
-    proxy = make_proxy(session_id)
+    # proxy_address:port形式でsessionを受け取る
+    proxy_address_port = request.args.get("session", "")
+    
+    # プロキシを取得
+    proxy_url, proxy_dict = make_proxy(proxy_address_port)
 
     ydl_opts = {
-        'proxy': proxy,
+        'proxy': proxy_url,
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
@@ -262,7 +367,9 @@ def captions():
                     format_type = fmt.get('ext', 'unknown')
                 
                 sub_url = fmt['url']
-                caption_url = f"/caption?url={urllib.parse.quote(sub_url, safe='')}&session={session_id}&format={format_type}"
+                # proxy_address:port 形式の識別子を生成
+                proxy_identifier = f"{proxy_dict['proxy_address']}:{proxy_dict['port']}"
+                caption_url = f"/caption?url={urllib.parse.quote(sub_url, safe='')}&session={proxy_identifier}&format={format_type}"
                 
                 if is_auto:
                     language_display = f"{get_language_name(lang)} (Auto Generated)"
@@ -275,7 +382,12 @@ def captions():
                     "language_code": lang,
                     "is_generated": is_auto,
                     "is_translatable": False,
-                    "caption_url": caption_url
+                    "caption_url": caption_url,
+                    "proxy_info": {
+                        "address": proxy_dict['proxy_address'],
+                        "port": proxy_dict['port'],
+                        "country": proxy_dict.get('country_code', 'Unknown')
+                    }
                 })
 
         add_tracks(manual_subs, False)
@@ -283,7 +395,12 @@ def captions():
 
         return jsonify({
             "video_id": video_id,
-            "session": session_id,
+            "session": f"{proxy_dict['proxy_address']}:{proxy_dict['port']}",
+            "proxy_info": {
+                "address": proxy_dict['proxy_address'],
+                "port": proxy_dict['port'],
+                "country": proxy_dict.get('country_code', 'Unknown')
+            },
             "captions": captions_list
         })
 
@@ -296,29 +413,24 @@ def captions():
 @app.route("/caption")
 def caption():
     sub_url = request.args.get("url")
-    session = request.args.get("session")
+    session = request.args.get("session", "")  # proxy_address:port形式
     format_hint = request.args.get("format", "")
     gen_yomi = request.args.get("gen_yomi", "0") == "1"
 
-    if not sub_url or not session:
+    if not sub_url:
         return jsonify({"error": "url and session are required"}), 400
 
     # URLデコード
     decoded_url = urllib.parse.unquote(sub_url)
 
-    # プロキシを構築
-    try:
-        session_id = int(session)
-    except ValueError:
-        return jsonify({"error": "session must be an integer"}), 400
-    
-    proxy = make_proxy(session_id)
+    # プロキシを構築（sessionパラメータを使用）
+    proxy_url, proxy_dict = make_proxy(session)
 
     # 字幕ファイルをプロキシ経由で取得
     try:
         resp = requests.get(
             decoded_url,
-            proxies={"http": proxy, "https": proxy},
+            proxies={"http": proxy_url, "https": proxy_url},
             timeout=30,
             headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -326,7 +438,22 @@ def caption():
         )
         resp.raise_for_status()
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch subtitle: {str(e)}"}), 502
+        # プロキシが失敗した場合、別のプロキシでリトライ
+        try:
+            print(f"Proxy failed, retrying with different proxy: {e}")
+            new_proxy_url, new_proxy_dict = make_proxy()  # ランダムプロキシ
+            resp = requests.get(
+                decoded_url,
+                proxies={"http": new_proxy_url, "https": new_proxy_url},
+                timeout=30,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+            resp.raise_for_status()
+            proxy_dict = new_proxy_dict  # 成功したプロキシ情報を更新
+        except Exception as retry_error:
+            return jsonify({"error": f"Failed to fetch subtitle: {str(retry_error)}"}), 502
 
     raw_text = resp.text
     
@@ -355,7 +482,12 @@ def caption():
         "language": language_display,
         "language_code": lang_code,
         "is_generated": False,
-        "transcript": result_transcript
+        "transcript": result_transcript,
+        "proxy_info": {
+            "address": proxy_dict['proxy_address'],
+            "port": proxy_dict['port'],
+            "country": proxy_dict.get('country_code', 'Unknown')
+        }
     })
 
 if __name__ == "__main__":
