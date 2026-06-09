@@ -39,22 +39,25 @@ def text_to_yomi(text: str) -> str:
     return "".join(result)
 
 # --------------------------------
-# プロキシ設定（環境変数から取得）
+# プロキシ設定（Webshareの実際の設定に合わせる）
 # --------------------------------
 PROXY_USERNAME = os.environ.get("PROXY_USERNAME", "hsdlmspx")
 PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD", "w1bhmbj3ghmr")
-PROXY_ENDPOINT = os.environ.get("PROXY_ENDPOINT", "pr.webshare.io")  # 例: your.endpoint.com
-PROXY_PORT = os.environ.get("PROXY_PORT", "30000")
+PROXY_HOST = os.environ.get("PROXY_HOST", "38.154.203.95")  # Webshareの実際のIP
+PROXY_PORT = os.environ.get("PROXY_PORT", "5863")  # Webshareの実際のポート
 
 def make_proxy(session_id: int) -> str:
-    """セッションID付きのプロキシURLを生成"""
-    return f"http://{PROXY_USERNAME}-{session_id}:{PROXY_PASSWORD}@{PROXY_ENDPOINT}:{PROXY_PORT}"
+    """
+    セッションID付きのプロキシURLを生成
+    Webshareの場合は username-session_id 形式
+    """
+    return f"http://{PROXY_USERNAME}-{session_id}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 
 # --------------------------------
 # 字幕パース (SRT / VTT)
 # --------------------------------
 def parse_srt(text: str):
-    """SRT形式のテキストをセグメントのリストに変換（開始秒、テキスト、終了秒）"""
+    """SRT形式のテキストをセグメントのリストに変換"""
     pattern = re.compile(
         r'(\d+)\n(\d{1,2}:\d{2}:\d{2}[.,]\d{3}) --> (\d{1,2}:\d{2}:\d{2}[.,]\d{3})\n(.*?)(?=\n\n|\Z)',
         re.DOTALL
@@ -74,7 +77,7 @@ def parse_srt(text: str):
     return segments
 
 def parse_vtt(text: str):
-    """WebVTT形式のテキストをセグメントのリストに変換（開始秒、テキスト、終了秒）"""
+    """WebVTT形式のテキストをセグメントのリストに変換"""
     # WEBVTTヘッダとスタイルブロックを除去
     text = re.sub(r'^WEBVTT.*\n', '', text)
     text = re.sub(r'STYLE\n.*?\n\n', '', text, flags=re.DOTALL)
@@ -89,7 +92,7 @@ def parse_vtt(text: str):
         start = time_to_seconds(start_str)
         end = time_to_seconds(end_str)
         txt = m.group(3).strip().replace('\n', ' ')
-        # VTTではタグを除去（簡易的に）
+        # VTTタグを除去（簡易的に）
         txt = re.sub(r'<[^>]+>', '', txt)
         segments.append({
             'text': txt,
@@ -107,7 +110,7 @@ def time_to_seconds(ts: str) -> float:
     return h * 3600 + m * 60 + s
 
 # --------------------------------
-# 言語名の解決（できれば）
+# 言語名の解決
 # --------------------------------
 try:
     import langcodes
@@ -163,7 +166,7 @@ def captions():
             for lang, formats in sub_dict.items():
                 if not formats:
                     continue
-                # 利用可能な字幕形式を選ぶ（例：vtt → srv1 → srt → 先頭のもの）
+                # 利用可能な字幕形式を選ぶ（vttを優先）
                 fmt = None
                 for ext in ('vtt', 'srv1', 'srt', 'json3'):
                     for f in formats:
@@ -174,14 +177,17 @@ def captions():
                         break
                 if not fmt:
                     fmt = formats[0]  # フォールバック
+                
                 sub_url = fmt['url']
+                # 字幕URLをエンコードしてcaption_urlを作成
                 caption_url = f"/caption?url={urllib.parse.quote(sub_url, safe='')}&session={session_id}"
+                
                 captions_list.append({
                     "id": f"{lang}:{'auto' if is_auto else 'manual'}",
                     "language": get_language_name(lang),
                     "language_code": lang,
                     "is_generated": is_auto,
-                    "is_translatable": False,  # yt-dlp からは取得できないため一律 false
+                    "is_translatable": False,
                     "caption_url": caption_url
                 })
 
@@ -190,12 +196,12 @@ def captions():
 
         return jsonify({
             "video_id": video_id,
-            "session": session_id,          # 今回のプロキシセッションID
+            "session": session_id,
             "captions": captions_list
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "captions": []}), 500
 
 @app.route("/caption")
 def caption():
@@ -214,6 +220,7 @@ def caption():
         session_id = int(session)
     except ValueError:
         return jsonify({"error": "session must be an integer"}), 400
+    
     proxy = make_proxy(session_id)
 
     # 字幕ファイルをプロキシ経由で取得
@@ -221,20 +228,24 @@ def caption():
         resp = requests.get(
             decoded_url,
             proxies={"http": proxy, "https": proxy},
-            timeout=30
+            timeout=30,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
         )
         resp.raise_for_status()
     except Exception as e:
         return jsonify({"error": f"Failed to fetch subtitle: {str(e)}"}), 502
 
     raw_text = resp.text
-    # SRT / VTT 判定（拡張子やコンテンツから推測）
+    
+    # SRT / VTT 判定
     if 'WEBVTT' in raw_text[:100]:
         segments = parse_vtt(raw_text)
     else:
         segments = parse_srt(raw_text)
 
-    # 字幕URLから video_id と言語を抽出（yt-dlpが生成する典型的なURL）
+    # 字幕URLから video_id と言語を抽出
     parsed = urlparse(decoded_url)
     qs = parse_qs(parsed.query)
     video_id = qs.get('v', [None])[0] or "unknown"
@@ -255,12 +266,13 @@ def caption():
         "video_id": video_id,
         "language": get_language_name(lang_code) if lang_code != "unknown" else lang_code,
         "language_code": lang_code,
-        "is_generated": False,  # 個別字幕リクエストでは判別不可
+        "is_generated": False,
         "transcript": result_transcript
     })
 
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000))
+        port=int(os.environ.get("PORT", 5000)),
+        debug=True
     )
