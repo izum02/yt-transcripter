@@ -5,6 +5,8 @@ import threading
 import itertools
 import urllib.parse
 from urllib.parse import urlparse, parse_qs
+import subprocess
+import tempfile
 
 import requests
 import yt_dlp
@@ -39,6 +41,30 @@ def text_to_yomi(text: str) -> str:
             continue
         result.append(reading)
     return "".join(result)
+
+# --------------------------------
+# Deno パスの読み込み
+# --------------------------------
+def load_deno_config():
+    """deno_config.json から Deno のパスを読み込む"""
+    try:
+        with open('deno_config.json', 'r') as f:
+            config = json.load(f)
+            deno_path = config.get('deno_path')
+            if deno_path and os.path.exists(deno_path):
+                return deno_path
+            elif deno_path:
+                print(f"Warning: Deno path '{deno_path}' does not exist")
+    except FileNotFoundError:
+        print("Warning: deno_config.json not found")
+    except json.JSONDecodeError:
+        print("Warning: deno_config.json is invalid JSON")
+    
+    # デフォルトでは PATH から deno を探す
+    return "deno"
+
+DENO_PATH = load_deno_config()
+print(f"Using Deno path: {DENO_PATH}")
 
 # --------------------------------
 # Webshare プロキシ管理
@@ -105,6 +131,28 @@ def get_proxy_info_from_session(session: str) -> dict:
     """セッション文字列 (address-port) からプロキシ情報を辞書から引く"""
     with proxy_lock:
         return proxy_dict.get(session)
+
+# --------------------------------
+# Deno が利用可能か確認
+# --------------------------------
+def check_deno_available():
+    """Deno 実行可能ファイルが利用可能か確認する"""
+    try:
+        result = subprocess.run(
+            [DENO_PATH, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            print(f"Deno is available: {result.stdout.splitlines()[0]}")
+            return True
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    print("Warning: Deno is not available. EJS support may not work.")
+    return False
+
+DENO_AVAILABLE = check_deno_available()
 
 # --------------------------------
 # 字幕パース (SRT / VTT / JSON3)
@@ -251,6 +299,7 @@ def captions():
     # セッション文字列は「アドレス-ポート」
     session_token = f"{proxy_info['proxy_address']}-{proxy_info['port']}"
 
+    # yt-dlp のオプション設定
     ydl_opts = {
         'proxy': proxy_url,
         'quiet': True,
@@ -261,8 +310,17 @@ def captions():
         'writeautomaticsub': False,
         'geo_bypass': True,
         'geo_bypass_country': 'US',
-        'cookiefile': 'cookiex.txt',  # この行を追加
+        'cookiefile': 'cookiex.txt',
     }
+    
+    # Deno が利用可能な場合、EJS を有効化
+    if DENO_AVAILABLE:
+        # Deno のパスを指定して EJS を有効化
+        ydl_opts['compat_opts'] = {'enable-ejs'}
+        ydl_opts['js_runtimes'] = [f'deno:{DENO_PATH}']
+        print(f"EJS enabled with Deno at: {DENO_PATH}")
+    else:
+        print("EJS disabled: Deno not available")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -314,13 +372,15 @@ def captions():
         return jsonify({
             "video_id": video_id,
             "session": session_token,
-            "captions": captions_list
+            "captions": captions_list,
+            "ejs_enabled": DENO_AVAILABLE
         })
 
     except Exception as e:
         return jsonify({
             "error": str(e),
-            "captions": []
+            "captions": [],
+            "ejs_enabled": DENO_AVAILABLE
         }), 500
 
 @app.route("/caption")
