@@ -315,9 +315,12 @@ def captions():
     
     # Deno が利用可能な場合、EJS を有効化
     if DENO_AVAILABLE:
-        # Deno のパスを指定して EJS を有効化
-        ydl_opts['compat_opts'] = {'enable-ejs'}
-        ydl_opts['js_runtimes'] = [f'deno:{DENO_PATH}']
+        # 正しいフォーマット: 辞書形式 {runtime: {config}}
+        ydl_opts['js_runtimes'] = {
+            'deno': {
+                'path': DENO_PATH
+            }
+        }
         print(f"EJS enabled with Deno at: {DENO_PATH}")
     else:
         print("EJS disabled: Deno not available")
