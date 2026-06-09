@@ -39,19 +39,23 @@ def text_to_yomi(text: str) -> str:
     return "".join(result)
 
 # --------------------------------
-# プロキシ設定（Webshareの実際の設定に合わせる）
+# プロキシ設定
 # --------------------------------
 PROXY_USERNAME = os.environ.get("PROXY_USERNAME", "hsdlmspx")
 PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD", "w1bhmbj3ghmr")
-PROXY_HOST = os.environ.get("PROXY_HOST", "38.154.203.95")  # Webshareの実際のIP
-PROXY_PORT = os.environ.get("PROXY_PORT", "5863")  # Webshareの実際のポート
+PROXY_HOST = os.environ.get("PROXY_HOST", "38.154.203.95")
+PROXY_PORT = os.environ.get("PROXY_PORT", "5863")
 
-def make_proxy(session_id: int) -> str:
+def make_proxy(session_id: int = None) -> str:
     """
-    セッションID付きのプロキシURLを生成
-    Webshareの場合は username-session_id 形式
+    プロキシURLを生成
+    Webshareの場合、基本的な認証形式でOK
     """
-    return f"http://{PROXY_USERNAME}-{session_id}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+    if session_id:
+        # セッションID付きの場合（ドキュメントが何故か効かず）
+        return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+    else:
+        return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 
 # --------------------------------
 # 字幕パース (SRT / VTT)
@@ -78,7 +82,6 @@ def parse_srt(text: str):
 
 def parse_vtt(text: str):
     """WebVTT形式のテキストをセグメントのリストに変換"""
-    # WEBVTTヘッダとスタイルブロックを除去
     text = re.sub(r'^WEBVTT.*\n', '', text)
     text = re.sub(r'STYLE\n.*?\n\n', '', text, flags=re.DOTALL)
     pattern = re.compile(
@@ -92,7 +95,6 @@ def parse_vtt(text: str):
         start = time_to_seconds(start_str)
         end = time_to_seconds(end_str)
         txt = m.group(3).strip().replace('\n', ' ')
-        # VTTタグを除去（簡易的に）
         txt = re.sub(r'<[^>]+>', '', txt)
         segments.append({
             'text': txt,
@@ -143,6 +145,9 @@ def captions():
     session_id = random.randint(1, 100000)
     proxy = make_proxy(session_id)
 
+    # デバッグ用にプロキシ設定をログ出力
+    print(f"Using proxy: {proxy}")
+
     ydl_opts = {
         'proxy': proxy,
         'quiet': True,
@@ -151,9 +156,21 @@ def captions():
         'skip_download': True,
         'writesubtitles': False,
         'writeautomaticsub': False,
+        # プロキシ関連の追加オプション
+        'geo_bypass': True,
+        'geo_bypass_country': 'US',
     }
 
     try:
+        # まず、プロキシが正しく動作するかテスト
+        test_response = requests.get(
+            "https://ipv4.webshare.io/",
+            proxies={"http": proxy, "https": proxy},
+            timeout=10
+        )
+        print(f"Proxy test response: {test_response.status_code}")
+        print(f"Proxy IP: {test_response.text}")
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
 
@@ -200,8 +217,17 @@ def captions():
             "captions": captions_list
         })
 
+    except requests.exceptions.RequestException as e:
+        # プロキシ接続テストのエラー
+        return jsonify({
+            "error": f"Proxy connection failed: {str(e)}",
+            "captions": []
+        }), 500
     except Exception as e:
-        return jsonify({"error": str(e), "captions": []}), 500
+        return jsonify({
+            "error": str(e),
+            "captions": []
+        }), 500
 
 @app.route("/caption")
 def caption():
