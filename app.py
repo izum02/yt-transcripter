@@ -228,9 +228,7 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-@app.before_first_request
-def startup():
-    """最初のリクエスト前にプロキシプールを初期化"""
+with app.app_context():
     initialize_proxy_pool()
 
 @app.route("/")
