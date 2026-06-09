@@ -261,6 +261,7 @@ def captions():
         'writeautomaticsub': False,
         'geo_bypass': True,
         'geo_bypass_country': 'US',
+        'cookiefile': 'cookiex.txt',  # この行を追加
     }
 
     try:
