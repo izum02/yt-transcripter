@@ -302,8 +302,6 @@ def captions():
     # yt-dlp のオプション設定
     ydl_opts = {
         'proxy': proxy_url,
-        'quiet': True,
-        'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
         'writesubtitles': False,
@@ -311,6 +309,7 @@ def captions():
         'geo_bypass': True,
         'geo_bypass_country': 'US',
         'cookiefile': 'cookiex.txt',
+        'verbose': True,
     }
     
     # Deno が利用可能な場合、EJS を有効化
