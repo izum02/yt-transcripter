@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import json
 import urllib.parse
 from urllib.parse import urlparse, parse_qs
 
@@ -11,7 +12,7 @@ from flask_cors import CORS
 from sudachipy import Dictionary
 
 # --------------------------------
-# テキスト読み付与（変更なし）
+# テキスト読み付与
 # --------------------------------
 tokenizer = Dictionary().create()
 
@@ -47,10 +48,6 @@ PROXY_HOST = os.environ.get("PROXY_HOST", "38.154.203.95")
 PROXY_PORT = os.environ.get("PROXY_PORT", "5863")
 
 def make_proxy(session_id: int = None) -> str:
-    """
-    プロキシURLを生成
-    Webshareの場合、基本的な認証形式でOK
-    """
     if session_id:
         # セッションID付きの場合（ドキュメントが何故か効かず）
         return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
@@ -58,7 +55,7 @@ def make_proxy(session_id: int = None) -> str:
         return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 
 # --------------------------------
-# 字幕パース (SRT / VTT)
+# 字幕パース (SRT / VTT / JSON3)
 # --------------------------------
 def parse_srt(text: str):
     """SRT形式のテキストをセグメントのリストに変換"""
@@ -81,26 +78,87 @@ def parse_srt(text: str):
     return segments
 
 def parse_vtt(text: str):
-    """WebVTT形式のテキストをセグメントのリストに変換"""
-    text = re.sub(r'^WEBVTT.*\n', '', text)
-    text = re.sub(r'STYLE\n.*?\n\n', '', text, flags=re.DOTALL)
-    pattern = re.compile(
-        r'(\d{1,2}:\d{2}:\d{2}[.,]\d{3}) --> (\d{1,2}:\d{2}:\d{2}[.,]\d{3}).*?\n(.*?)(?=\n\n|\Z)',
-        re.DOTALL
-    )
+    """WebVTT形式のテキストをセグメントのリストに変換（YouTubeの形式に対応）"""
+    # WEBVTTヘッダーを削除
+    text = re.sub(r'^WEBVTT.*?\n', '', text, flags=re.MULTILINE)
+    
+    # 空行やスタイルブロックなどを削除
+    lines = text.split('\n')
     segments = []
-    for m in pattern.finditer(text):
-        start_str = m.group(1).replace(',', '.')
-        end_str = m.group(2).replace(',', '.')
-        start = time_to_seconds(start_str)
-        end = time_to_seconds(end_str)
-        txt = m.group(3).strip().replace('\n', ' ')
-        txt = re.sub(r'<[^>]+>', '', txt)
-        segments.append({
-            'text': txt,
-            'start': start,
-            'duration': end - start
-        })
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # 空行はスキップ
+        if not line:
+            i += 1
+            continue
+        
+        # タイムスタンプ行を検出（--> を含む）
+        if '-->' in line:
+            # タイムスタンプをパース（align:start position:0% などの属性を無視）
+            time_match = re.match(r'(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3})', line)
+            if time_match:
+                start_str = time_match.group(1).replace(',', '.')
+                end_str = time_match.group(2).replace(',', '.')
+                start = time_to_seconds(start_str)
+                end = time_to_seconds(end_str)
+                
+                # 次の行から空行までが字幕テキスト
+                i += 1
+                text_lines = []
+                while i < len(lines):
+                    current_line = lines[i].strip()
+                    if not current_line:
+                        break
+                    # HTMLタグを削除（<c>タグなど）
+                    clean_line = re.sub(r'<[^>]+>', '', current_line)
+                    text_lines.append(clean_line)
+                    i += 1
+                
+                txt = ' '.join(text_lines).strip()
+                if txt:
+                    segments.append({
+                        'text': txt,
+                        'start': start,
+                        'duration': end - start
+                    })
+        i += 1
+    
+    return segments
+
+def parse_json3(data: dict):
+    """JSON3形式の字幕をセグメントのリストに変換"""
+    segments = []
+    
+    # JSON3の構造: {"events": [{"tStartMs": 1000, "dDurationMs": 2000, "segs": [{"utf8": "text"}]}]}
+    events = data.get('events', [])
+    
+    for event in events:
+        start_ms = event.get('tStartMs', 0)
+        duration_ms = event.get('dDurationMs', 0)
+        
+        # テキストを抽出
+        segs = event.get('segs', [])
+        text_parts = []
+        for seg in segs:
+            if 'utf8' in seg:
+                text_parts.append(seg['utf8'])
+        
+        text = ''.join(text_parts).strip()
+        
+        # 改行や特殊文字をクリーンアップ
+        text = text.replace('\n', ' ')
+        text = re.sub(r'\s+', ' ', text)
+        
+        if text:
+            segments.append({
+                'text': text,
+                'start': start_ms / 1000.0,  # ミリ秒→秒
+                'duration': duration_ms / 1000.0
+            })
+    
     return segments
 
 def time_to_seconds(ts: str) -> float:
@@ -110,6 +168,24 @@ def time_to_seconds(ts: str) -> float:
     m = int(parts[1])
     s = float(parts[2])
     return h * 3600 + m * 60 + s
+
+def parse_subtitle(text: str, format_hint: str = None) -> list:
+    """字幕の形式を自動判定してパース"""
+    # JSON3の場合（format_hintがjson3またはテキストがJSONとしてパース可能）
+    if format_hint == 'json3':
+        try:
+            data = json.loads(text)
+            if 'events' in data:
+                return parse_json3(data)
+        except:
+            pass
+    
+    # VTTの場合
+    if format_hint == 'vtt' or ('WEBVTT' in text[:100]):
+        return parse_vtt(text)
+    
+    # SRTの場合（デフォルト）
+    return parse_srt(text)
 
 # --------------------------------
 # 言語名の解決
@@ -141,12 +217,9 @@ def captions():
     if not video_id:
         return jsonify({"error": "video_id is required"}), 400
 
-    # セッションIDを生成（1～100000）
+    # セッションIDを生成
     session_id = random.randint(1, 100000)
     proxy = make_proxy(session_id)
-
-    # デバッグ用にプロキシ設定をログ出力
-    print(f"Using proxy: {proxy}")
 
     ydl_opts = {
         'proxy': proxy,
@@ -156,21 +229,11 @@ def captions():
         'skip_download': True,
         'writesubtitles': False,
         'writeautomaticsub': False,
-        # プロキシ関連の追加オプション
         'geo_bypass': True,
         'geo_bypass_country': 'US',
     }
 
     try:
-        # まず、プロキシが正しく動作するかテスト
-        test_response = requests.get(
-            "https://ipv4.webshare.io/",
-            proxies={"http": proxy, "https": proxy},
-            timeout=10
-        )
-        print(f"Proxy test response: {test_response.status_code}")
-        print(f"Proxy IP: {test_response.text}")
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
 
@@ -183,25 +246,32 @@ def captions():
             for lang, formats in sub_dict.items():
                 if not formats:
                     continue
-                # 利用可能な字幕形式を選ぶ（vttを優先）
+                # 利用可能な字幕形式を選ぶ（優先順位: vtt, json3, srv1, srt）
                 fmt = None
-                for ext in ('vtt', 'srv1', 'srt', 'json3'):
+                format_type = None
+                for ext in ('vtt', 'json3', 'srv1', 'srt'):
                     for f in formats:
                         if f.get('ext') == ext:
                             fmt = f
+                            format_type = ext
                             break
                     if fmt:
                         break
                 if not fmt:
-                    fmt = formats[0]  # フォールバック
+                    fmt = formats[0]
+                    format_type = fmt.get('ext', 'unknown')
                 
                 sub_url = fmt['url']
-                # 字幕URLをエンコードしてcaption_urlを作成
-                caption_url = f"/caption?url={urllib.parse.quote(sub_url, safe='')}&session={session_id}"
+                caption_url = f"/caption?url={urllib.parse.quote(sub_url, safe='')}&session={session_id}&format={format_type}"
+                
+                if is_auto:
+                    language_display = f"{get_language_name(lang)} (Auto Generated)"
+                else:
+                    language_display = get_language_name(lang)
                 
                 captions_list.append({
                     "id": f"{lang}:{'auto' if is_auto else 'manual'}",
-                    "language": get_language_name(lang),
+                    "language": language_display,
                     "language_code": lang,
                     "is_generated": is_auto,
                     "is_translatable": False,
@@ -217,12 +287,6 @@ def captions():
             "captions": captions_list
         })
 
-    except requests.exceptions.RequestException as e:
-        # プロキシ接続テストのエラー
-        return jsonify({
-            "error": f"Proxy connection failed: {str(e)}",
-            "captions": []
-        }), 500
     except Exception as e:
         return jsonify({
             "error": str(e),
@@ -233,6 +297,7 @@ def captions():
 def caption():
     sub_url = request.args.get("url")
     session = request.args.get("session")
+    format_hint = request.args.get("format", "")
     gen_yomi = request.args.get("gen_yomi", "0") == "1"
 
     if not sub_url or not session:
@@ -265,17 +330,13 @@ def caption():
 
     raw_text = resp.text
     
-    # SRT / VTT 判定
-    if 'WEBVTT' in raw_text[:100]:
-        segments = parse_vtt(raw_text)
-    else:
-        segments = parse_srt(raw_text)
+    # 字幕をパース（書式は適用せず、テキストのみ抽出）
+    segments = parse_subtitle(raw_text, format_hint)
 
-    # 字幕URLから video_id と言語を抽出
+    # 字幕URLから言語コードを抽出
     parsed = urlparse(decoded_url)
     qs = parse_qs(parsed.query)
-    video_id = qs.get('v', [None])[0] or "unknown"
-    lang_code = qs.get('lang', [None])[0] or "unknown"
+    lang_code = qs.get('lang', [None])[0] or qs.get('tl', [None])[0] or "unknown"
 
     result_transcript = []
     for seg in segments:
@@ -287,10 +348,11 @@ def caption():
         if gen_yomi:
             row["yomi"] = text_to_yomi(seg["text"])
         result_transcript.append(row)
-
+    
+    language_display = get_language_name(lang_code) if lang_code != "unknown" else lang_code
+    
     return jsonify({
-        "video_id": video_id,
-        "language": get_language_name(lang_code) if lang_code != "unknown" else lang_code,
+        "language": language_display,
         "language_code": lang_code,
         "is_generated": False,
         "transcript": result_transcript
